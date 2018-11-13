@@ -1,0 +1,150 @@
+---
+title: "CKME 136 - CAPSTONE"
+author: "Elena Wang"
+date: "November, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Adding libraries
+```{r}
+install.packages("ggplot2")
+library(ggplot2)
+install.packages("chron")
+library(chron)
+install.packages("caTools")
+library(caTools)
+```
+
+## Loading data into R
+```{r}
+data <- read.csv("C:/642/Subway_SRT_Logs_2017.csv", header = T)
+code_metadata <- read.csv("C:/642/Subway_SRT_Log_Codes.csv", header = T)
+```
+
+
+## Data Processing and Cleaning
+```{r}
+# Checking the Dates for missing values and inconsistencies, then changing data from factor to date
+#data.frame(table(data$Date, useNA = "always"))
+data$Date <- chron(dates. =  as.character(data$Date), format = "y/m/d")
+
+## Converting Time from factor to time 
+data$Time <- times(lapply(as.character(data$Time), function(x) paste(x,":00", sep = "")))
+
+## Creating an attribute for Daypart categories based on Time
+data$Daypart[data$Time >= "01:30:00" & data$Time < "06:00:00"] <- "Overnight"
+data$Daypart[data$Time >= "22:00:00" | data$Time < "01:30:00"] <- "Late Evening"
+data$Daypart[data$Time >= "19:00:00" & data$Time < "22:00:00"] <- "Early Evening"
+data$Daypart[data$Time >= "15:00:00" & data$Time < "19:00:00" & is.weekend(data$Date) == FALSE] <- "Afternoon Peak Period"
+data$Daypart[data$Time >= "12:00:00" & data$Time < "19:00:00" & is.weekend(data$Date) == TRUE] <- "Afternoon"
+data$Daypart[data$Time >= "09:00:00" & data$Time < "15:00:00" & is.weekend(data$Date) == FALSE] <- "Midday"
+data$Daypart[data$Time >= "08:00:00" & data$Time < "12:00:00" & is.weekend(data$Date) == TRUE] <- "Morning"
+data$Daypart[data$Time >= "06:00:00" & data$Time < "09:00:00" & is.weekend(data$Date) == FALSE] <- "Morning Peak Period"
+data$Daypart[data$Time >= "06:00:00" & data$Time < "08:00:00" & is.weekend(data$Date) == TRUE] <- "Early Morning"
+#ggplot(data, aes(x = data$Daypart)) + geom_bar()
+
+## Checking Days for missing values or inconsistencies, then reordering the days of the week to be Monday to Sunday
+#data.frame(table(data$Day, useNA = "always"))
+data$Day <- ordered(data$Day, levels = c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday","Sunday"))
+levels(data$Day)
+#ggplot(data, aes(x = data$Day)) + geom_bar()
+
+## Checking Code for missing values or inconsistencies by matching it with the code metadata and research provided by TTC
+data <- data[((data$Code %in% code_metadata$SUB.RMENU.CODE) | (data$Code == "MUNCA") | (data$Code == "TRNCA")),]
+#data$Code <- factor(data$Code)
+#data.frame(table(data$Code, useNA = "always"))
+
+## Checking Bound for missing values or inconsistencies
+#data.frame(table(data$Bound, useNA = "always"))
+levels(data$Bound) <- c(levels(data$Bound), "T")
+terminal_station <- c("FINCH STATION", "YONGE SHP STATION", "DON MILLS STATION", "UNION STATION", "sHEPPARD WEST STATION", "VAUGHAN MC STATION", "KIPLING STATION", "KENNEDY BD STATION", "KENNEDY SRT STATION", "MCCOWAN")
+data$Bound[data$Bound == "" & data$Station %in% terminal_station] <- "T"
+data <- data[!(data$Min.Delay == 0 & data$Vehicle == 0 & data$Bound == "" & data$Line == ""),]
+data <- data[-(grep('^\\d', data$Station)),]
+
+## Checking Line for missing values or inconsistencies
+data <- data[-(grep('^\\d', data$Line)),]
+
+## Removing delay locations which are not related to stations or subway lines
+data <- data[-grep("YARD$", data$Station),]
+data$Line <- gsub("B/D", "BD", data$Line)
+subway_lines <- c("BD", "YU", "SHP","SRT")
+data <- data[data$Line %in% subway_lines,]
+
+data[data$Bound == "",]$Bound <- NA
+data <- na.omit(data)
+data$Line <- factor(data$Line)
+
+## Adding a Delay Classifier: 0 is not delayed, 1 is delayed
+data$Delay[data$Min.Delay <= 2] <- 0
+data$Delay[data$Min.Delay > 2] <- 1
+data$Delay <- as.factor(data$Delay)
+```
+
+## Splitting the Data: 75% Training Data, 25% Testing Data
+```{r}
+set.seed(101)
+sample = sample.split(data$Min.Delay, SplitRatio = .75)
+train = subset(data, sample == TRUE)
+test  = subset(data, sample == FALSE)
+```
+
+## Feature Selection: Boruta was selected as this wrapper method handles both quantitative and categorical values as well as categories with many classes. It does not, however, handle collinearity so correlation between numeric values were also tested.
+```{r}
+## Using the Boruta for feature selection
+install.packages("Boruta")
+library(Boruta)
+boruta_output <- Boruta(Delay ~ ., data = train, maxRuns = 20, doTrace=2)
+print(boruta_output)
+plot(boruta_output, xlab = "", xaxt = "n")
+lz <- lapply(1:ncol(boruta_output$ImpHistory),function(i) boruta_output$ImpHistory[is.finite(boruta_output$ImpHistory[,i]),i])
+names(lz) <- colnames(boruta_output$ImpHistory)
+Labels <- sort(sapply(lz,median))
+axis(side = 1,las=2,labels = names(Labels), at = 1:ncol(boruta_output$ImpHistory), cex.axis = 0.7)
+
+## Checking Correlation of Numeric Features
+cor(data$Min.Delay, data$Min.Gap)
+#Because the two features are highly, positively correlated. I have decided to exclude Min.Gap from the model. 
+```
+
+## Decision Tree
+```{r}
+install.packages("rpart")
+install.packages("rpart.plot")
+library(rpart)
+library(rpart.plot)
+model_tree <- rpart(Delay~Time+Day+Station+Code+Min.Delay+Bound+Line+Vehicle+Daypart, data = train, method = 'class')
+rpart.plot(model_tree)
+predict_tree <- predict(model_tree, test, type = "class")
+conf_matrix_tree <- table(test$Delay, predict_tree, dnn = c("Predicted", "Actual"))
+print(conf_matrix_tree)
+```
+
+## Naive Bayes
+```{r}
+install.packages("e1071")
+library(e1071)
+model_nb <- naiveBayes(Delay ~ Time + Day + Station + Code + Min.Delay + Bound + Line + Vehicle, data = train, laplace = 1)
+pred_nb <- predict(model_nb, test)
+conf_matrix_nb <- table(pred_nb, test$Delay, dnn = c("Predicted", "Actual"))
+print(conf_matrix_nb)
+
+# Evalutation of the model
+precision_nb <- (conf_matrix_nb[1,1] + conf_matrix_nb[2,2])/(conf_matrix_nb[1,1]+conf_matrix_nb[2,2]+conf_matrix_nb[2,1])
+print(precision_nb)
+
+accuracy_nb <- (conf_matrix_nb[1,1] + conf_matrix_nb[2,2])/sum(conf_matrix_nb)
+print(accuracy_nb)
+```
+
+## Logistic Regression
+```{r}
+
+model_lr <- glm(Delay ~ Time + Day + Station + Code + Min.Delay + Bound + Line + Vehicle,family=binomial(link='logit'),data=train)
+summary(model_lr)
+```
