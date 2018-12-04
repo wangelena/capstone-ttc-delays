@@ -1,0 +1,288 @@
+---
+title: "CKME 136 - CAPSTONE FINAL"
+author: "Elena Wang"
+date: "December, 2018"
+output: html_document
+---
+
+## Adding libraries
+```{r}
+install.packages("ggplot2")
+library(ggplot2)
+install.packages("chron")
+library(chron)
+install.packages("caTools")
+library(caTools)
+install.packages("dplyr")
+library(dplyr)
+install.packages("caret")
+library(caret)
+```
+
+## Loading data into R
+```{r}
+data <- read.csv("C:/642/Subway_SRT_Logs_2017.csv", header = T)
+code_metadata <- read.csv("C:/642/Subway_SRT_Log_Codes.csv", header = T)
+```
+
+
+## Data Processing and Cleaning
+```{r}
+# Checking the Dates for missing values and inconsistencies, then changing data from factor to date
+#data.frame(table(data$Date, useNA = "always"))
+data$Date <- chron(dates. =  as.character(data$Date), format = "y/m/d")
+
+## Converting Time from factor to time 
+data$Time <- times(lapply(as.character(data$Time), function(x) paste0(x,":00")))
+
+## Creating an attribute for Daypart categories based on Time
+data$Daypart[data$Time >= "01:30:00" & data$Time < "06:00:00"] <- "Overnight"
+data$Daypart[data$Time >= "22:00:00" | data$Time < "01:30:00"] <- "Late Evening"
+data$Daypart[data$Time >= "19:00:00" & data$Time < "22:00:00"] <- "Early Evening"
+data$Daypart[data$Time >= "15:00:00" & data$Time < "19:00:00" & is.weekend(data$Date) == FALSE] <- "Afternoon Peak"
+data$Daypart[data$Time >= "12:00:00" & data$Time < "19:00:00" & is.weekend(data$Date) == TRUE] <- "Afternoon"
+data$Daypart[data$Time >= "09:00:00" & data$Time < "15:00:00" & is.weekend(data$Date) == FALSE] <- "Midday"
+data$Daypart[data$Time >= "08:00:00" & data$Time < "12:00:00" & is.weekend(data$Date) == TRUE] <- "Morning"
+data$Daypart[data$Time >= "06:00:00" & data$Time < "09:00:00" & is.weekend(data$Date) == FALSE] <- "Morning Peak"
+data$Daypart[data$Time >= "06:00:00" & data$Time < "08:00:00" & is.weekend(data$Date) == TRUE] <- "Early Morning"
+data$Daypart <- as.factor(data$Daypart)
+ggplot(data, aes(x = data$Daypart)) + geom_bar()
+
+## Checking Days for missing values or inconsistencies, then reordering the days of the week to be Monday to Sunday
+#data.frame(table(data$Day, useNA = "always"))
+data$Day <- ordered(data$Day, levels = c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday","Sunday"))
+# levels(data$Day)
+ggplot(data, aes(x = data$Day)) + geom_bar()
+
+## Checking Code for missing values or inconsistencies by matching it with the code metadata and research provided by TTC
+data <- data[((data$Code %in% code_metadata$SUB.RMENU.CODE) | (data$Code == "MUNCA") | (data$Code == "TRNCA")),]
+data$Code <- factor(data$Code)
+#data.frame(table(data$Code, useNA = "always"))
+
+## Checking Bound for missing values or inconsistencies
+# data.frame(table(data$Bound, useNA = "always"))
+levels(data$Bound) <- c(levels(data$Bound), "T")
+terminal_station <- c("FINCH STATION", "YONGE SHP STATION", "DON MILLS STATION", "UNION STATION", "sHEPPARD WEST STATION", "VAUGHAN MC STATION", "KIPLING STATION", "KENNEDY BD STATION", "KENNEDY SRT STATION", "MCCOWAN")
+data$Bound[data$Bound == "" & data$Station %in% terminal_station] <- "T"
+data <- data[!(data$Min.Delay == 0 & data$Vehicle == 0 & data$Bound == "" & data$Line == ""),]
+data[data$Bound == "",]$Bound <- NA
+train_bound <- c("N", "S", "E", "W", "T")
+data <- data[data$Bound %in% train_bound,]
+data$Bound <- factor(data$Bound)
+
+## Checking Line for missing values or inconsistencies
+# data.frame(table(data$Line, useNA = "always"))
+data <- data[-(grep('^\\d', data$Line)),]
+data$Line <- gsub("B/D", "BD", data$Line)
+subway_lines <- c("BD", "YU", "SHP","SRT")
+data <- data[data$Line %in% subway_lines,]
+data$Line <- factor(data$Line)
+
+## Removing delay locations which are not related to stations or subway lines
+# data.frame(table(data$Station, useNA = "always"))
+data <- data[-(grep('^\\d', data$Station)),]
+data <- data[-grep("YARD$", data$Station),]
+data <- data[-grep("WYE$", data$Station),]
+data <- data[-grep("HOSTLER$", data$Station),]
+data$Station <- factor(data$Station)
+
+data$Vehicle <- factor(data$Vehicle)
+
+data <- na.omit(data)
+```
+
+#Creating Class (Delay/No Delay) base don TTC Operating Schedule
+```{r}
+  data$Delay <- case_when(
+    data$Min.Delay > 7 ~ 1,
+    data$Min.Delay > 6 & data$Line == "SHP" ~ 1,
+    data$Min.Delay > 5 & data$Line == "BD" & is.weekend(data$Date) == TRUE ~ 1,
+    data$Min.Delay > 5 & data$Line == "BD" & data$Daypart == "Late Evening" ~ 1,
+    data$Min.Delay > 5 & data$Line == "SRT" & data$Daypart == "Morning Peak" ~ 1,
+    data$Min.Delay > 5 & data$Line == "SRT" & data$Daypart == "Afternoon Peak" ~ 1,
+    data$Min.Delay > 5 & data$Line == "YU" & data$Daypart == "Late Evening" ~ 1,
+    data$Min.Delay > 5 & data$Line == "YU" & data$Daypart == "Early Evening" & is.weekend(data$Date) == TRUE ~ 1,
+    data$Min.Delay > 5 & data$Line == "YU" & data$Daypart == "Morning" & data$Day == "Sunday" ~ 1,
+    data$Min.Delay > 4 & data$Line == "YU" & data$Daypart == "Morning" & data$Day == "Saturday" ~ 1,
+    data$Min.Delay > 4 & data$Line == "BD" & data$Daypart == "Early Evening" & is.weekend(data$Date) == FALSE ~ 1,
+    data$Min.Delay > 4 & data$Line == "YU" & data$Daypart == "Midday" ~ 1,
+    data$Min.Delay > 4 & data$Line == "YU" & data$Daypart == "Afternoon" ~ 1,
+    data$Min.Delay > 4 & data$Line == "YU" & data$Daypart == "Early Evening" & is.weekend(data$Date) == FALSE ~ 1,
+    data$Min.Delay > 3 & data$Line == "YU" & data$Daypart == "Afernoon Peak" ~ 1,
+    data$Min.Delay > 3 & data$Line == "BD" & data$Daypart == "Afernoon Peak" ~ 1,
+    data$Min.Delay > 3 & data$Line == "BD" & data$Daypart == "Midday" ~ 1,
+    data$Min.Delay > 2 & data$Line == "BD" & data$Daypart == "Morning Peak" ~ 1,
+    data$Min.Delay > 2 & data$Line == "YU" & data$Daypart == "Morning Peak" ~ 1, 
+    TRUE ~ 0 
+    )      
+
+data$Delay <- as.factor(data$Delay)
+```
+
+## Exploratory data analysis
+```{r}
+# Delays by Day of the Week
+ggplot(data[data$Delay == 1,], aes(x = data[data$Delay == 1,]$Day)) + geom_bar()
+
+# Delays by Daypart
+ggplot(data[data$Delay == 1,], aes(x = data[data$Delay == 1,]$Daypart)) + geom_bar()
+
+# Delays by Code
+ggplot(data[data$Delay == 1,], aes(x = data[data$Delay == 1,]$Code)) + geom_bar()
+
+# Delays by Line
+ggplot(data[data$Delay == 1,], aes(x = data[data$Delay == 1,]$Line)) + geom_bar()
+
+# Delays by Bound
+ggplot(data[data$Delay == 1,], aes(x = data[data$Delay == 1,]$Bound)) + geom_bar()
+
+# Delays by Station
+ggplot(data[data$Delay == 1,], aes(x = data[data$Delay == 1,]$Station)) + geom_bar()
+
+# Delays by Vehicle
+ggplot(data[data$Delay == 1,], aes(x = data[data$Delay == 1,]$Vehicle)) + geom_bar()
+
+# Distribution of Min.Delay and Min.Gap
+hist(data[data$Delay == 1,]$Min.Delay, main = "Min Delay", xlab = "Min.Delay")
+
+```
+
+## Splitting the Data: 80% Training Data, 20% Testing Data
+```{r}
+set.seed(101)
+sample = sample.split(data$Min.Delay, SplitRatio = .8)
+train = subset(data, sample == TRUE)
+test  = subset(data, sample == FALSE)
+```
+
+## Feature Selection: Boruta was selected as this wrapper method handles both quantitative and categorical values as well as categories with many classes. It does not, however, handle collinearity so correlation between numeric values were also tested.
+```{r}
+## Using the Boruta for feature selection
+install.packages("Boruta")
+library(Boruta)
+boruta_output <- Boruta(Delay ~ ., data = train, maxRuns = 20, doTrace=2)
+print(boruta_output)
+data.frame(boruta_output$finalDecision)
+
+plot(boruta_output, xlab = "", xaxt = "n")
+lz <- lapply(1:ncol(boruta_output$ImpHistory),function(i) boruta_output$ImpHistory[is.finite(boruta_output$ImpHistory[,i]),i])
+names(lz) <- colnames(boruta_output$ImpHistory)
+Labels <- sort(sapply(lz,median))
+axis(side = 1,las=2,labels = names(Labels), at = 1:ncol(boruta_output$ImpHistory), cex.axis = 0.7)
+
+## Checking Correlation of Numeric Features
+cor(data$Min.Delay, data$Min.Gap, method = "spearman")
+## Because the two features are highly, positively correlated. I have decided to exclude Min.Gap from the model. 
+```
+
+## Decision Tree
+```{r}
+install.packages("rpart")
+install.packages("rpart.plot")
+library(rpart)
+library(rpart.plot)
+
+# k-fold Cross Validation to set the Complexity Parameter (CP) for the Decision Tree
+model_tree_cv <- train(Delay ~ Time + Day + Min.Delay + Line + Vehicle + Daypart, data = train, trControl=trainControl(method = "cv", number = 5), method="rpart")
+print(model_tree_cv)
+
+model_tree <- rpart(Delay~Time+Day+Min.Delay+Line+Daypart+Vehicle, data = train, method = 'class', control = rpart.control(cp = model_tree_cv$results$cp[which.min(model_tree_cv$results$cp)]))
+rpart.plot(model_tree, cex = 0.6)
+printcp(model_tree)
+# plotcp(model_tree)
+
+pred_tree <- predict(model_tree, test, type = "class")
+cm_tree <- confusionMatrix(pred_tree, test$Delay)
+cm_tree
+```
+
+## Naive Bayes
+```{r}
+install.packages("e1071")
+library(e1071)
+set.seed(101)
+flds <- createFolds(train$Delay, k = 5, list = TRUE, returnTrain = FALSE)
+
+
+model_nb1 <- naiveBayes(Delay ~ Time + Day + Station + Code + Min.Delay + Bound + Line + Vehicle + Daypart, train[-flds[[1]],], laplace = 1)
+pred_nb1 <- predict(model_nb1, train[flds[[1]],], type = "class")
+
+model_nb2 <- naiveBayes(Delay ~ Time + Day + Station + Code + Min.Delay + Bound + Line + Vehicle + Daypart, train[-flds[[2]],], laplace = 1)
+pred_nb2 <- predict(model_nb2, train[flds[[2]],], type = "class")
+
+model_nb3 <- naiveBayes(Delay ~ Time + Day + Station + Code + Min.Delay + Bound + Line + Vehicle + Daypart, train[-flds[[3]],], laplace = 1)
+pred_nb3 <- predict(model_nb3, train[flds[[3]],], type = "class")
+
+model_nb4 <- naiveBayes(Delay ~ Time + Day + Station + Code + Min.Delay + Bound + Line + Vehicle + Daypart, train[-flds[[4]],], laplace = 1)
+pred_nb4 <- predict(model_nb4, train[flds[[4]],], type = "class")
+
+model_nb5 <- naiveBayes(Delay ~ Time + Day + Station + Code + Min.Delay + Bound + Line + Vehicle + Daypart, train[-flds[[5]],], laplace = 1)
+pred_nb5 <- predict(model_nb5, train[flds[[5]],], type = "class")
+
+
+# Evalutation of the model
+cm1 <- confusionMatrix(pred_nb1, train[flds[[1]],]$Delay)
+cm2 <- confusionMatrix(pred_nb2, train[flds[[2]],]$Delay)
+cm3 <- confusionMatrix(pred_nb3, train[flds[[3]],]$Delay)
+cm4 <- confusionMatrix(pred_nb4, train[flds[[4]],]$Delay)
+cm5 <- confusionMatrix(pred_nb5, train[flds[[5]],]$Delay)
+which.max(c(cm1$overall[1], cm2$overall[1], cm3$overall[1], cm4$overall[1], cm5$overall[1]))
+
+# Final Model
+pred_nb <- predict(model_nb1, test, type = "class")
+cm_nb <- confusionMatrix(pred_nb, test$Delay)
+cm_nb
+```
+
+## Logistic Regression
+```{r}
+model_lr1 <- glm(Delay ~ Min.Delay, family=binomial(link='logit'),data=train)
+summary(model_lr1)
+
+model_lr2 <- glm(Delay ~ Daypart + Min.Delay, family=binomial(link='logit'),data=train)
+summary(model_lr2)
+
+model_lr3 <- glm(Delay ~ Daypart + Min.Delay + Vehicle,family=binomial(link='logit'),data=train)
+summary(model_lr3)
+
+AIC <- c(model_lr1$aic, model_lr2$aic, model_lr3$aic)
+plot(AIC, type = "l", xlab = "LR Model")
+
+#Since the second model had the lowest AIC, it was the used for prediction
+pred_lr <- predict(model_lr2, test, type = 'response')
+
+cm_lr <- confusionMatrix(as.factor(as.numeric(pred_lr > 0.5)), test$Delay)
+cm_lr
+```
+
+## ROC Curve Analysis
+```{r}
+install.packages("ROCR")
+library(ROCR)
+
+## Decision Tree
+ROCRpred <- prediction(as.numeric(pred_tree), test$Delay)
+ROCRperf <- performance(ROCRpred, 'tpr', 'fpr')
+plot(ROCRperf, col = "forest green", lwd = 3, main = "ROC Curve Comparison")
+
+## Naive Bayes
+ROCRpred <- prediction(as.numeric(pred_nb), test$Delay)
+ROCRperf <- performance(ROCRpred, 'tpr', 'fpr')
+plot(ROCRperf, col = "blue", lwd = 3, add = TRUE)
+
+## GLM
+ROCRpred <- prediction(pred_lr, test$Delay)
+ROCRperf <- performance(ROCRpred, 'tpr', 'fpr')
+plot(ROCRperf, col = "red", lwd = 3, add = TRUE)
+abline(a=0, b=1, lty=2, lwd=1, col="black")
+legend("bottomright", legend=c("Decision Tree", "Naive Bayes", "Logistic Regression"),
+       col=c("forest green", "blue", "red"), lwd=2)
+
+# Precision, Recall, F1 Score
+eval1 <- data.frame(cm_tree$byClas, cm_nb$byClass, cm_lr$byClass)
+eval2 <- data.frame(cm_tree$overall, cm_nb$overall, cm_lr$overall)
+colnames(eval1) <- c("Decision Tree", "Naive Bayes", "Logistic Regression")
+colnames(eval2) <- c("Decision Tree", "Naive Bayes", "Logistic Regression")
+model_eval <- rbind(eval1, eval2)
+model_eval
+```
